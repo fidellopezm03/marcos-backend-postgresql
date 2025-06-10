@@ -8,11 +8,12 @@ import (
 )
 
 type ProductService interface {
-    GetAll(page, pageSize int) ([]model.ProductDTO, error)
-    GetFiltered(page, pageSize int, categID, minPrice, maxPrice *int64) ([]model.ProductDTO, error)
-    GetRelated(productID int64, limit int) ([]model.ProductDTO, error)
+    GetAll(page, pageSize int) (*model.ProductsResult, error)
+    GetFiltered(page, pageSize int, categID, minPrice, maxPrice *int64, category []string, name string) (*model.ProductsResult, error)
+    GetRelated(productID int64, page, page_size int, category string) (*model.ProductsResult, error)
     GetBestSelling(limit int) ([]model.ProductDTO, error)
     GetVariants(productID int64) ([]model.ProductDTO, error)
+    GetCategorys()([]repository.Category, error)
 }
 
 type productService struct {
@@ -25,7 +26,7 @@ func NewProductService(r repository.ProductRepo) ProductService {
 }
 
 // GetAll aplica paginación a partir de page y pageSize.
-func (s *productService) GetAll(page, pageSize int) ([]model.ProductDTO, error) {
+func (s *productService) GetAll(page, pageSize int) (*model.ProductsResult, error) {
     if page < 1 {
         return nil, fmt.Errorf("page debe ser >= 1")
     }
@@ -34,23 +35,28 @@ func (s *productService) GetAll(page, pageSize int) ([]model.ProductDTO, error) 
 }
 
 // GetFiltered delega el filtrado con paginación al repo.
-func (s *productService) GetFiltered(page, pageSize int, categID, minPrice, maxPrice *int64) ([]model.ProductDTO, error) {
+func (s *productService) GetFiltered(page, pageSize int, categID, minPrice, maxPrice *int64, category []string, name string) (*model.ProductsResult, error) {
     if page < 1 {
         return nil, fmt.Errorf("page debe ser >= 1")
     }
     offset := (page - 1) * pageSize
-    return s.repo.GetFiltered(offset, pageSize, categID, minPrice, maxPrice)
+    return s.repo.GetFiltered(offset, pageSize, categID, minPrice, maxPrice, category, name)
 }
 
 // GetRelated toma el límite y delega a repo.
-func (s *productService) GetRelated(productID int64, limit int) ([]model.ProductDTO, error) {
+func (s *productService) GetRelated(productID int64, page, page_size int, category string) (*model.ProductsResult, error) {
     if productID <= 0 {
         return nil, fmt.Errorf("productID inválido")
     }
-    if limit < 1 {
-        limit = 5
+    if page_size < 1{
+        page_size = 5
     }
-    return s.repo.GetRelated(productID, limit)
+    if page <= 0{
+        page = 1
+    }
+    offset := (page-1)*page_size
+    
+    return s.repo.GetRelated(productID, &offset,&page_size)
 }
 
 // GetBestSelling delega a repo (limit por defecto si se pasa 0).
@@ -59,6 +65,9 @@ func (s *productService) GetBestSelling(limit int) ([]model.ProductDTO, error) {
         limit = 10
     }
     return s.repo.GetBestSelling(limit)
+}
+func (s *productService) GetCategorys()([]repository.Category,error){
+    return s.repo.GetCategorys()
 }
 
 // GetVariants delega a repo.

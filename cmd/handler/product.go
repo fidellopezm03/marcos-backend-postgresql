@@ -28,6 +28,7 @@ func (h *ProductHandler) RegisterRoutes(r chi.Router) {
         r.Get("/{id}/related", h.getRelated)              // GET /products/{id}/related?limit=
         r.Get("/best-selling", h.getBestSelling)          // GET /products/best-selling?limit=
         r.Get("/{id}/variants", h.getVariants)            // GET /products/{id}/variants
+        r.Get("/categorys",h.getCategorys)
     })
 }
 
@@ -42,7 +43,7 @@ func (h *ProductHandler) getAll(w http.ResponseWriter, r *http.Request) {
     if pageSize < 1 {
         pageSize = 20
     }
-
+    
     products, err := h.svc.GetAll(page, pageSize)
     if err != nil {
         render.JSON(w, r, map[string]string{"error": err.Error()})
@@ -65,7 +66,8 @@ func (h *ProductHandler) getFiltered(w http.ResponseWriter, r *http.Request) {
     }
 
     // Parse price
-    var minPrice, maxPrice *int64
+    var minPrice, maxPrice *int64 
+            
     if raw := q.Get("min_price"); raw != "" {
         if i, err := strconv.ParseInt(raw,10, 64); err == nil {
             minPrice = &i
@@ -87,12 +89,15 @@ func (h *ProductHandler) getFiltered(w http.ResponseWriter, r *http.Request) {
     if pageSize < 1 {
         pageSize = 20
     }
-
-    products, err := h.svc.GetFiltered(page, pageSize, categID, minPrice, maxPrice)
+    
+    categorys := r.URL.Query()["categorys"]
+    name := r.URL.Query().Get("name")
+    products, err := h.svc.GetFiltered(page, pageSize, categID, minPrice, maxPrice, categorys, name)
     if err != nil {
         render.JSON(w, r, map[string]string{"error": err.Error()})
         return
     }
+    
     render.JSON(w, r, products)
 }
 
@@ -106,12 +111,27 @@ func (h *ProductHandler) getRelated(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-    if limit < 1 {
-        limit = 5
+    page_size, err := strconv.Atoi(r.URL.Query().Get("page_size"))
+    if err != nil{
+        render.Status(r, http.StatusBadRequest)
+        render.JSON(w,r,map[string]string{"error": "error en la solicitud"})
     }
+    if page_size < 1 {
+        page_size = 5
+    }
+    page, err:= strconv.Atoi(r.URL.Query().Get("page"))
+    if err!= nil{
+        render.Status(r, http.StatusBadRequest)
+        render.JSON(w,r,map[string]string{"error": "error en la solicitud"})
+    }
+    if page <=0 {
+        page = 1
+    }
+    offset := (page - 1)*page_size
 
-    products, err := h.svc.GetRelated(prodID, limit)
+    category := r.URL.Query().Get("category")
+
+    products, err := h.svc.GetRelated(prodID,offset,page_size,category)
     if err != nil {
         render.JSON(w, r, map[string]string{"error": err.Error()})
         return
@@ -131,6 +151,15 @@ func (h *ProductHandler) getBestSelling(w http.ResponseWriter, r *http.Request) 
         return
     }
     render.JSON(w, r, products)
+}
+func (h*ProductHandler) getCategorys(w http.ResponseWriter, r *http.Request){
+    categorys, err := h.svc.GetCategorys()
+    if err != nil {
+        render.Status(r,http.StatusInternalServerError)
+        render.JSON(w,r,map[string]string{"Error: ":err.Error()})
+        return
+    }
+    render.JSON(w,r,categorys)
 }
 
 // --- GET /products/{id}/variants ---
