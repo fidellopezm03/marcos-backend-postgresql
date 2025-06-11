@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/model"
 )
@@ -77,75 +78,96 @@ func getValueJson(json, fallback string) (string, error){
 // GetFiltered permite filtrar por categoría (categ_id) y rango de precio list_price.
 // Ambos filtros son opcionales: pasar nil para omitir.
 func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxPrice *int64, categorys []string, name string) (*model.ProductsResult, error) {
-	var (
-		params []any
-	)
+	var params []any
+	
+	wheres := []string{}
 	ProductsResult := &model.ProductsResult{}
 	i := 1
 	//const id_location = "8"
-	//selectQuery := []string{", SUM(quantity) as stock",", product.name as name, pc.name as category, list_price as price, stock", ", name, list_price, stock", ", stock"}
+	selectQuery := []string{", SUM(quantity) as stock",", product.name as name, pc.name as category, list_price as price, stock", ", name, list_price, stock", ", stock"}
+	selectQueryCount := []string{}
+	for range selectQuery{
+		selectQueryCount = append(selectQueryCount, "")
+	}
+
 	exist := "WITH exist AS (SELECT product_id%s FROM stock_quant WHERE location_id = 8 GROUP BY product_id HAVING SUM(quantity) > 0"
 	 
-	where := ""
-	queryp := "SELECT product_id as id%s FROM (SELECT product_id, pos_categ_id%s FROM (SELECT product_id%s, product_tmpl_id FROM exist e INNER JOIN product_product p ON p.id = e.product_id) INNER JOIN product_template pt ON product_tmpl_id = pt.id) product INNER JOIN pos_category pc ON pc.id = product.pos_categ_id%s"
+	const where = " WHERE"
+	queryp := "SELECT product_id as id%s FROM (SELECT product_id, pos_categ_id%s FROM (SELECT product_id%s, product_tmpl_id FROM exist e INNER JOIN product_product p ON p.id = e.product_id) INNER JOIN product_template pt ON product_tmpl_id = pt.id%s) product INNER JOIN pos_category pc ON pc.id = product.pos_categ_id%s"
+	where2 := ""
 	if minPrice != nil && maxPrice != nil {
-		limitPrice := fmt.Sprintf("list_price >= %v and list_price <= %v",minPrice,maxPrice)
-		where = " " + limitPrice + " "
+		limitPrice := fmt.Sprintf(" list_price >= %v and list_price <= %v",minPrice,maxPrice)
+		where2 += limitPrice
+		
 	}
-	if categorys != nil{
-		if len(where)>0{
-			where += " AND "
+	if len(name)>0{
+		if len(where2) > 0{
+			where2 += " AND "
 		}
-		queryCateg := fmt.Sprintf(" pc.name->>'es_ES' = '%v'",i)
+		where2 += fmt.Sprintf("product.name LIKE '%$%v%'", i)
+		where2 = where + where2
+		params = append(params, name)
+		i++
+	}
+
+	wheres = append(wheres, where2)
+	
+	queryCateg := ""
+	if categorys != nil{
+		
+		queryCateg = fmt.Sprintf(" pc.name->>'es_ES' = '%v'",i)
 		i++
 		for range len(categorys)-1{
 			queryCateg+=fmt.Sprintf(" OR pc.name->>'es_ES' = '%v'",i)
 			i++
 		}
 		if len(categorys)>1{
-			queryCateg = "(" + queryCateg + " )"
+			queryCateg = where + " (" + queryCateg + " )"
 		}
 
-		where += queryCateg
+		
 		params = append(params, categorys)
 		i++ 
 	}
-	if len(name)>0{
-		if len(where)>0{
-			where += " AND "
-		}
-		where += fmt.Sprintf("product.name LIKE '%$%v%'", i)
-		params = append(params, name)
-		i++
-	}
+	wheres = append(wheres, queryCateg)
+	
 	pag := fmt.Sprintf(" OFFSET %v LIMIT %v", offset, limit)
 	
-	whereCount := ""
+	
 	querypCount := queryp
 	existCount := exist + ")"
 	if len(where)>0{
-		where =  " WHERE" + where
-		whereCount = where
 		queryp += pag
 	}else{
 		exist += pag
 	}
 
 	exist += ")"
-
-	querypCount = "SELECT COUNT(*) as total FROM (" + fmt.Sprintf(querypCount,whereCount) + ");"
-	queryCount := existCount + " " + queryp
-
-	query := exist + " " + fmt.Sprintf(queryp,where)
+	stringsToanys := func (strings []string)[]any{
+		anys := make([]any,len(strings))
+		for index, value := range strings{
+			anys[index]=value
+		}
+		return anys
+	}
+	anys := stringsToanys(append(selectQueryCount,wheres...))
+	
+	queryCount := fmt.Sprintf(existCount + " " + "SELECT COUNT(*) as total FROM (" + querypCount + ");",anys...)
+	
+	anys = stringsToanys(append(selectQuery,wheres...))
+	query := fmt.Sprintf(exist + " " + queryp,anys...)
 	query+=";"
 
-	errChan := make(chan error)
-	
+	var (
+		wg sync.WaitGroup
+		errQueryProducts error
+	)
+	wg.Add(1)
 	go func(){
+		defer wg.Done()
 		rows, err := r.DB.Query(query,params...)
 		if err != nil{
-			log.Printf("Error en la consulta: %v\n", err)
-			errChan <- err
+			errQueryProducts = fmt.Errorf("Error en la consulta: %v\n", err)
 			return 
 		}
 		defer rows.Close()
@@ -172,22 +194,22 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 			product.Stock = stock.Float64
 			ProductsResult.Products = append(ProductsResult.Products,product)
 		}
-		errChan<-nil
+		errQueryProducts = nil
 	}()
 	
 	row := r.DB.QueryRow(queryCount,params...)
 	
 	if(row == nil){
-		err := fmt.Errorf("Error geting total products: %v",row.Err().Error())
+		err := fmt.Errorf("Error geting total products: %v",row.Err())
 		return nil,err
 	}
 	if err := row.Scan(&ProductsResult.Total);err!=nil{
 		err := fmt.Errorf("Error scaning total product: %v", err)
 		return nil, err
 	}
-
-	if err := <-errChan; err != nil{
-		return nil,err
+	wg.Wait()
+	if errQueryProducts != nil{
+		return nil,errQueryProducts
 	}
 	return ProductsResult, nil;
 }
