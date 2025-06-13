@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -24,11 +26,11 @@ func NewProductHandler(s service.ProductService) *ProductHandler {
 func (h *ProductHandler) RegisterRoutes(r chi.Router) {
     r.Route("/products", func(r chi.Router) {
         r.Get("/", h.getAll)                              // GET /products?page=&page_size=
-        r.Get("/filtered", h.getFiltered)                 // GET /products/filtered?categ_id=&min_price=&max_price=&page=&page_size=
+        r.Post("/filtered", h.getFiltered)                 // GET /products/filtered?categ_id=&min_price=&max_price=&page=&page_size=
         r.Get("/{id}/related", h.getRelated)              // GET /products/{id}/related?limit=
         r.Get("/best-selling", h.getBestSelling)          // GET /products/best-selling?limit=
         r.Get("/{id}/variants", h.getVariants)            // GET /products/{id}/variants
-        r.Get("/categorys",h.getCategorys)
+        r.Get("/categories",h.getCategorys)
     })
 }
 
@@ -80,6 +82,8 @@ func (h *ProductHandler) getFiltered(w http.ResponseWriter, r *http.Request) {
         }
     }
 
+    orderValue := q.Get("order_value")
+
     // Paginación
     page, _ := strconv.Atoi(q.Get("page"))
     pageSize, _ := strconv.Atoi(q.Get("page_size"))
@@ -90,11 +94,19 @@ func (h *ProductHandler) getFiltered(w http.ResponseWriter, r *http.Request) {
         pageSize = 20
     }
     
-    categorys := r.URL.Query()["categorys"]
+    var categorys []string
+    err := json.NewDecoder(r.Body).Decode(&categorys)
+    if err != nil{
+        render.Status(r,http.StatusBadRequest)
+        render.JSON(w,r,map[string]string{"error": "Error in body request"})
+        return
+    }
     name := r.URL.Query().Get("name")
-    products, err := h.svc.GetFiltered(page, pageSize, categID, minPrice, maxPrice, categorys, name)
+    products, err := h.svc.GetFiltered(page, pageSize, categID, minPrice, maxPrice, categorys, name, orderValue)
     if err != nil {
-        render.JSON(w, r, map[string]string{"error": err.Error()})
+        log.Printf("Error: %v",err)
+        render.Status(r,http.StatusInternalServerError)
+        render.JSON(w, r, map[string]string{"error": "Error in server"})
         return
     }
     

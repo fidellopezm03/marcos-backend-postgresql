@@ -9,7 +9,7 @@ import (
 
 type ProductService interface {
     GetAll(page, pageSize int) (*model.ProductsResult, error)
-    GetFiltered(page, pageSize int, categID, minPrice, maxPrice *int64, category []string, name string) (*model.ProductsResult, error)
+    GetFiltered(page, pageSize int, categID, minPrice, maxPrice *int64, category []string, name,orderValue string) (*model.ProductsResult, error)
     GetRelated(productID int64, page, page_size int, category string) (*model.ProductsResult, error)
     GetBestSelling(limit int) ([]model.ProductDTO, error)
     GetVariants(productID int64) ([]model.ProductDTO, error)
@@ -35,12 +35,12 @@ func (s *productService) GetAll(page, pageSize int) (*model.ProductsResult, erro
 }
 
 // GetFiltered delega el filtrado con paginación al repo.
-func (s *productService) GetFiltered(page, pageSize int, categID, minPrice, maxPrice *int64, category []string, name string) (*model.ProductsResult, error) {
+func (s *productService) GetFiltered(page, pageSize int, categID, minPrice, maxPrice *int64, category []string, name, orderValue string) (*model.ProductsResult, error) {
     if page < 1 {
         return nil, fmt.Errorf("page debe ser >= 1")
     }
     offset := (page - 1) * pageSize
-    return s.repo.GetFiltered(offset, pageSize, categID, minPrice, maxPrice, category, name)
+    return s.repo.GetFiltered(offset, pageSize, categID, minPrice, maxPrice, category, name,orderValue)
 }
 
 // GetRelated toma el límite y delega a repo.
