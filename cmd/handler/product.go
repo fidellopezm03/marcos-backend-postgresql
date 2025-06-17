@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/cors"
 	"github.com/go-chi/render"
 
 	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/service"
@@ -24,6 +25,14 @@ func NewProductHandler(s service.ProductService) *ProductHandler {
 
 // RegisterRoutes monta todas las rutas en el router pasado.
 func (h *ProductHandler) RegisterRoutes(r chi.Router) {
+    r.Use(cors.Handler(cors.Options{
+        AllowedOrigins: []string{"http://localhost:5173"},
+        AllowedMethods: []string{"GET","POST","PUT","DELETE","OPTIONS"},
+        AllowedHeaders: []string{"Accept","Authorization","Content-Type","X-CSRF-Token"},
+        ExposedHeaders: []string{"Link"},
+        AllowCredentials: true,
+        MaxAge: 300,
+    }))
     r.Route("/products", func(r chi.Router) {
         r.Get("/", h.getAll)                              // GET /products?page=&page_size=
         r.Post("/filtered", h.getFiltered)                 // GET /products/filtered?categ_id=&min_price=&max_price=&page=&page_size=
@@ -54,7 +63,9 @@ func (h *ProductHandler) getAll(w http.ResponseWriter, r *http.Request) {
     // Serializa Producto a JSON puro (se pueden mapear campos si se desea)
     render.JSON(w, r, products)
 }
-
+type Categories struct {
+    Categories []string `json:"categories"`
+}
 // --- GET /products/filtered?categ_id=&min_price=&max_price=&page=&page_size= ---
 func (h *ProductHandler) getFiltered(w http.ResponseWriter, r *http.Request) {
     q := r.URL.Query()
@@ -94,15 +105,16 @@ func (h *ProductHandler) getFiltered(w http.ResponseWriter, r *http.Request) {
         pageSize = 20
     }
     
-    var categorys []string
-    err := json.NewDecoder(r.Body).Decode(&categorys)
+    var categories Categories
+    err := json.NewDecoder(r.Body).Decode(&categories)
     if err != nil{
         render.Status(r,http.StatusBadRequest)
         render.JSON(w,r,map[string]string{"error": "Error in body request"})
         return
     }
+    
     name := r.URL.Query().Get("name")
-    products, err := h.svc.GetFiltered(page, pageSize, categID, minPrice, maxPrice, categorys, name, orderValue)
+    products, err := h.svc.GetFiltered(page, pageSize, categID, minPrice, maxPrice, categories.Categories, name, orderValue)
     if err != nil {
         log.Printf("Error: %v",err)
         render.Status(r,http.StatusInternalServerError)

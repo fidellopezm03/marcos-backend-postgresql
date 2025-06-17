@@ -106,38 +106,38 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 
 	if minPrice != nil && maxPrice != nil {
 		limitPrice := fmt.Sprintf(" list_price >= %v and list_price <= %v",minPrice,maxPrice)
-		queryWhere += limitPrice
+		queryWhere += where + limitPrice
 		
 	}
 	if len(name)>0{
 		if len(queryWhere) > 0{
-			queryWhere += " AND "
+			queryWhere += " AND"
+		}else{
+			queryWhere += where
 		}
-		queryWhere += fmt.Sprintf("product.name LIKE '%%' || $%d || '%%'", i)
-		queryWhere = where + queryWhere
+		queryWhere += fmt.Sprintf(" product.name LIKE '%%' || $%d || '%%'", i)
 		params = append(params, name)
 		i++
 	}
 
 	orderBy := ""
 
-	if strings.ToLower(orderValue) == "desc" || strings.ToLower(orderValue) == "asc" {
-		orderBy = fmt.Sprintf(" GROUP BY list_price %s", strings.ToUpper(orderValue))
+	if value := strings.ToLower(orderValue); value == "desc" || value == "asc" {
+		orderBy = fmt.Sprintf(" GROUP BY list_price %s",value)
 	}
 	wheres = append(wheres, queryWhere + orderBy)
 	
 	queryWhere = ""
-	if categorys != nil{
+	if len(categorys)>0{
 		
-		queryWhere = fmt.Sprintf(" pc.name LIKE '%%'|| $%d || '%%'",i)
+		queryWhere = fmt.Sprintf("pc.name LIKE '%%'|| $%d || '%%'",i)
 		i++
 		for range len(categorys)-1{
 			queryWhere+=fmt.Sprintf(" OR pc.name LIKE '%%' || $%d || '%%'",i)
 			i++
 		}
-		if len(categorys)>1{
-			queryWhere = where + " (" + queryWhere + " )"
-		}
+		queryWhere = where + " ( " + queryWhere + " )"
+		
 		
 		anys := stringsToanys(categorys)
 		params = append(params, anys...)
@@ -153,7 +153,7 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 	
 	queryCount := ""
 
-	if len(params)==0{
+	if len(wheres)==0{
 		queryCount = fmt.Sprintf(existCount + " SELECT COUNT(*) as total FROM exist;","")
 	}else{
 		anys = stringsToanys(append(selectQueryCount,wheres...))
@@ -219,10 +219,10 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 		err := fmt.Errorf("Error geting total products: %v",row.Err())
 		return nil,err
 	}
-	// if err := row.Scan(&ProductsResult.Total);err!=nil{
-	// 	err = fmt.Errorf("Error scaning total product: %v", err)
-	// 	return nil, err
-	// }
+	if err := row.Scan(&ProductsResult.Total);err!=nil{
+		err = fmt.Errorf("Error scaning total product: %v", err)
+		return nil, err
+	}
 	wg.Wait()
 	if errQueryProducts != nil{
 		return nil,errQueryProducts
@@ -246,6 +246,9 @@ func (r *odooProductRepo) GetCategorys()([]Category,error){
 			continue
 		}
 		strs := strings.Split(category.CategoryName,"/")
+		if len(strs)==2||len(strs)==3{
+			continue
+		}
 		category.Category = strs[len(strs)-1]
 		categorys = append(categorys, category)
 	}
