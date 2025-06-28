@@ -6,12 +6,11 @@ import (
 
 type Api struct {
 	config *Config
-	
 }
 type Config struct {
-	adrr     string
-	
+	adrr string
 }
+
 func NewApi(addr string) *Api {
 	return &Api{
 		config: &Config{
@@ -20,13 +19,13 @@ func NewApi(addr string) *Api {
 	}
 }
 
+func (a *Api) Run(r http.Handler) error {
 
-func (a *Api) Run(r http.Handler) error{
-	
 	server := http.Server{
 		Addr:    a.config.adrr,
 		Handler: r,
 	}
+
 	return server.ListenAndServe()
-	
+
 }
