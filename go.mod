@@ -8,7 +8,7 @@ require (
 	github.com/go-chi/jwtauth v1.2.0
 	github.com/go-chi/render v1.0.3
 	github.com/lib/pq v1.10.9
-	golang.org/x/crypto v0.31.0
+	golang.org/x/crypto v0.37.0
 )
 
 require (

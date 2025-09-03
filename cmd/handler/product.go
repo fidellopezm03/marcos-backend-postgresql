@@ -1,14 +1,23 @@
 package handler
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+
 	"github.com/go-chi/render"
 
+	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/internal/env"
+	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/middleware"
 	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/service"
 )
 
@@ -23,8 +32,10 @@ func NewProductHandler(s service.ProductService) *ProductHandler {
 }
 
 // RegisterRoutes monta todas las rutas en el router pasado.
-func (h *ProductHandler) RegisterRoutes(r chi.Router) {
-
+func (h *ProductHandler) RegisterRoutes(r chi.Router, env *env.Env) {
+	r.Use(middleware.CORSmiddleware(env))
+	r.Use(middleware.RecoverPanic())
+	r.Post("/jireh-assistant", h.jirehAssistant)
 	r.Route("/products", func(r chi.Router) {
 		r.Get("/", h.getAll)                     // GET /products?page=&page_size=
 		r.Get("/{id}", h.getByID)                // GET /products/{id}
@@ -35,6 +46,171 @@ func (h *ProductHandler) RegisterRoutes(r chi.Router) {
 		r.Get("/categories", h.getCategorys)
 	})
 
+}
+
+const GeminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:streamGenerateContent"
+
+// —————————————————————————————————————————————————————————————————
+// Aux: interfaz para poder usar tanto http.ResponseWriter
+// como cualquier writer/buffer con Flush()
+// —————————————————————————————————————————————————————————————————
+type sseWriter interface {
+	Write([]byte) (int, error)
+	Flush()
+}
+
+// —————————————————————————————————————————————————————————————————
+// RequestBody, Content y Part asumidos desde tu modelo
+// —————————————————————————————————————————————————————————————————
+type RequestBody struct {
+	Contents []Content `json:"contents"`
+}
+
+type Content struct {
+	Role  string `json:"role"`
+	Parts []Part `json:"parts"`
+}
+
+type Part struct {
+	Text string `json:"text"`
+}
+type httpSSEWriter struct {
+	http.ResponseWriter
+	http.Flusher
+}
+
+// —————————————————————————————————————————————————————————————————
+// Función que hace el POST y streamea el resultado como SSE
+// —————————————————————————————————————————————————————————————————
+func streamFromGemini(message []Content, w sseWriter) error {
+	// 1) Preparamos el body JSON
+	reqBody := RequestBody{Contents: message}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshal request body: %w", err)
+	}
+
+	// 2) Creamos la petición
+	url := fmt.Sprintf("%s?key=%s", GeminiUrl, os.Getenv("GEMINI_API_KEY"))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// 3) Ejecutamos
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("perform request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 4) Encabezados SSE
+	w.Write([]byte(":\n")) // comentario para mantener viva la conexión
+	w.Write([]byte("retry: 10000\n"))
+	w.Write([]byte("event: message\n"))
+
+	// 5) Procesamos el stream
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// ignoramos todo lo que no empiece con "data: " o sea "[DONE]"
+		if !strings.HasPrefix(line, "data: ") || strings.Contains(line, "[DONE]") {
+			continue
+		}
+
+		// parseamos el JSON que viene tras "data: "
+		var parsed struct {
+			Candidates []struct {
+				Content struct {
+					Part []Part `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &parsed); err != nil {
+			// skip si no podemos parsear
+			continue
+		}
+		if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Part) == 0 {
+			continue
+		}
+
+		// extraemos el texto y escribimos como SSE
+		content := parsed.Candidates[0].Content.Part[0].Text
+		payload := fmt.Sprintf("data: %s\n\n", content)
+		if _, err := w.Write([]byte(payload)); err != nil {
+			return fmt.Errorf("write to client: %w", err)
+		}
+		w.Flush()
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scanner error: %w", err)
+	}
+	return nil
+}
+
+// —————————————————————————————————————————————————————————————————
+// Handler HTTP que expone el stream
+// —————————————————————————————————————————————————————————————————
+func (h *ProductHandler) jirehAssistant(w http.ResponseWriter, r *http.Request) {
+	// 1) Parámetro de consulta
+	q := chi.URLParam(r, "q")
+	if q == "" {
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, map[string]string{"error": "query 'q' is required"})
+		return
+	}
+	// cookie, err := r.Cookie("quantity")
+
+	// if err!=nil{
+
+	// }
+
+	// 2) Obtenemos categorías
+	cats, err := h.svc.GetCategorys()
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": "failed to load categories"})
+		return
+	}
+	var categoryNames []string
+	for _, c := range cats {
+		categoryNames = append(categoryNames, c.Category)
+	}
+
+	// 3) Preparamos prompt de sistema
+	prompt := fmt.Sprintf(
+		"Eres un asistente de belleza. El usuario pide: %q.\n"+
+			"Categorías disponibles:\n%s\n"+
+			"Responde solo con el nombre exacto de la mejor categoría.",
+		q, strings.Join(categoryNames, "\n"),
+	)
+	systemIntro := Content{
+		Role:  "user",
+		Parts: []Part{{Text: prompt}},
+	}
+
+	// 4) Cabeceras SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	writer := &httpSSEWriter{
+		ResponseWriter: w,
+		Flusher:        fl,
+	}
+
+	// 5) Llamamos al streamer
+	if err := streamFromGemini([]Content{systemIntro}, writer); err != nil {
+		// en caso de error de streaming, informamos al cliente y cerramos
+		http.Error(w, "stream error: "+err.Error(), http.StatusInternalServerError)
+	}
 }
 
 // --- GET /products?page=&page_size= ---

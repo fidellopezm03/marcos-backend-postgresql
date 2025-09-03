@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 
 	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/api"
 	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/handler"
@@ -10,11 +11,10 @@ import (
 	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/repository"
 	"github.com/fidellopezm03/marcos-backend-postgresql/cmd/service"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/cors"
 )
 
 func main() {
-
+	log.Println("Starting server...")
 	env := env.Start()
 
 	api := api.NewApi(env.Addr)
@@ -26,22 +26,20 @@ func main() {
 		Name:     env.DBNameOdoo,
 		SSLMode:  env.SSLMode,
 	})
-	connAdmin := db.GetConnectionAdmin(db.DBConfig{
-		Host:     env.DBHost,
-		Port:     env.DBPortAdmin,
-		User:     env.DBUserAdmin,
-		Password: env.DBPassAdmin,
-		Name:     env.DBNameAdmin,
-		SSLMode:  env.SSLMode,
-	})
+	log.Println("Database connection successful")
 
-	defer func() {
-		connOdoo.Close()
-		connAdmin.Close()
-	}()
+	if err := db.ApplyMigrations(connOdoo, "cmd/internal/db/migration.sql"); err != nil {
+		log.Fatalf("error applying migrations: %v", err)
+	}
+	log.Println("Migrations applied successfully")
+	defer connOdoo.Close()
+
+	if err := os.MkdirAll(repository.UploadDir, 0755); err != nil {
+		log.Fatalf("error detecting file/img: %v", err)
+	}
 
 	repositoryOdoo := repository.NewProductRepo(connOdoo)
-	repositoryAdmin := repository.NewAdminRepo(connAdmin)
+	repositoryAdmin := repository.NewAdminRepo(connOdoo)
 
 	productService := service.NewProductService(repositoryOdoo)
 
@@ -49,21 +47,9 @@ func main() {
 	adminHandler := handler.NewAdminHandler(repositoryAdmin)
 
 	router := chi.NewRouter()
-	router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{env.AddrClient},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
 
-	productHandlerOdoo.RegisterRoutes(router)
+	productHandlerOdoo.RegisterRoutes(router, env)
 	adminHandler.RegisterRoutes(router)
-	// newHashedPassword, err := bcrypt.GenerateFromPassword([]byte("adminmaitepassword"), bcrypt.DefaultCost)
-	// if err == nil {
-	// 	log.Println(string(newHashedPassword))
-	// }
 
 	log.Fatal("Error in server ", api.Run(router))
 

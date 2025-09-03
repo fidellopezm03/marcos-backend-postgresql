@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -209,6 +210,7 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 	var (
 		wg               sync.WaitGroup
 		errQueryProducts error
+		ProductsMap      = make(map[uint64]*model.ProductDTO)
 	)
 	wg.Add(1)
 	go func() {
@@ -221,11 +223,11 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 		defer rows.Close()
 		for rows.Next() {
 			var (
-				product  model.ProductDTO
 				stock    sql.NullFloat64
 				category sql.NullString
 				name     string
 			)
+			product := &model.ProductDTO{}
 
 			err := rows.Scan(&product.ID, &name, &category, &product.OriginalPrice, &stock)
 			if err != nil {
@@ -246,7 +248,7 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 				}
 			}
 			product.Stock = stock.Float64
-			ProductsResult.Products = append(ProductsResult.Products, product)
+			ProductsMap[product.ID] = product
 		}
 		errQueryProducts = nil
 	}()
@@ -261,11 +263,45 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 		err = fmt.Errorf("error scaning total product: %v", err)
 		return nil, err
 	}
+	if ProductsResult.Total == 0 {
+		return nil, errors.New("no products found")
+	}
 	wg.Wait()
 
 	if errQueryProducts != nil {
 		return nil, errQueryProducts
 	}
+
+	query = "SELECT res_id, mimetype, db_datas FROM ir_attachment WHERE db_dates NOT NULL AND length(db_datas) > 0 AND ("
+	for id := range ProductsMap {
+		query += fmt.Sprintf(" res_id = %d OR", id)
+	}
+	query = query[:len(query)-3] + " );"
+	rows, err := r.DB.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("error al obtener las imágenes: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id       uint64
+			mime     string
+			db_datas []byte
+		)
+		if err = rows.Scan(&id, mime, &db_datas); err != nil {
+			log.Printf("error al leer el valor de db_datas: %v", err)
+			continue
+		}
+		if mime != "image/png" && mime != "image/jpeg" {
+			continue
+		}
+		base64Str := base64.StdEncoding.EncodeToString(db_datas)
+		ProductsMap[id].Images = append(ProductsMap[id].Images, fmt.Sprintf("data:%s;base64,", mime)+base64Str)
+	}
+	for _, product := range ProductsMap {
+		ProductsResult.Products = append(ProductsResult.Products, *product)
+	}
+
 	return ProductsResult, nil
 }
 func (r *odooProductRepo) GetCategorys() ([]Category, error) {

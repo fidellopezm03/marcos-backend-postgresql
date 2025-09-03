@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+      POSTGRES_DB: odoo
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./dump.sql:/docker-entrypoint-initdb.d/dump.sql:ro # Monta el dump.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odoo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: build/api/Dockerfile
+    ports:
+      - "8060:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADDR: ":8060"
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: odoo
+      DB_USER: odoo
+      DB_PASS: odoo
+      SSL_MODE: disable
+      SECRET_KEY: verysecretkeyforjwtinproductionusealongersecret
+      FILESTORE_PATH: /app/filestore # Ruta del filestore
+    volumes:
+      - .:/app
+      - ./filestore:/app/filestore # Monta el directorio del filestore
+
+volumes:
+  postgres_data:
