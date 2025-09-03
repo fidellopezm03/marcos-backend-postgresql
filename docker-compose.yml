@@ -2,7 +2,7 @@ version: "3.9"
 
 services:
   postgres:
-    image: postgres:15
+    image: postgres:16
     environment:
       POSTGRES_USER: odoo
       POSTGRES_PASSWORD: odoo
@@ -28,7 +28,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      ADDR: ":8060"
+      ADDR: ":8080"
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: odoo

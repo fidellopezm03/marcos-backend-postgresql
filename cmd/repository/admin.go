@@ -272,7 +272,7 @@ func (r *sqlAdminRepo) GetAllinfo() (map[string]string, error) {
 
 }
 func (r *sqlAdminRepo) GetAllcontent() (map[string][]Content, error) {
-	query := "SELECT c.title, c.description, c.location, f.id as idImg FROM contents c LEFT JOIN file f ON c.id = f.content_id;"
+	query := "SELECT c.title, c.description, c.location, f.id as idImg FROM contents c LEFT JOIN files f ON c.id = f.content_id;"
 	rows, err := r.db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("error geting content: %v", err)

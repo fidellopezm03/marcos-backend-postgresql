@@ -44,7 +44,42 @@ func (r *odooProductRepo) GetAll(offset, limit int) (*model.ProductsResult, erro
 }
 func (r *odooProductRepo) GetByID(id int64) (*model.ProductDTO, error) {
 	query := fmt.Sprintf("WITH exist AS (SELECT product_id, SUM(quantity) as stock FROM stock_quant WHERE location_id = 8 AND product_id = %d  GROUP BY product_id HAVING SUM(quantity) > 0) SELECT product_id as id, product.name as name, pc.name as category, list_price as price, stock FROM (SELECT product_id, categ_id, name, list_price, stock FROM (SELECT product_id, stock, product_tmpl_id FROM exist e INNER JOIN product_product p ON p.id = e.product_id) INNER JOIN product_template pt ON product_tmpl_id = pt.id) product LEFT JOIN product_category pc ON pc.id = product.categ_id;", id)
+	var (
+		wg          sync.WaitGroup
+		errorImages error
+		images      []string
+	)
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		query := "SELECT res_id, mimetype, db_datas FROM ir_attachment WHERE length(db_datas) > 0 AND res_id = $1 AND (mimetype = 'image/png' OR mimetype = 'image/jpeg');"
+
+		rows, err := r.DB.Query(query, id)
+		if err != nil {
+			errorImages = fmt.Errorf("error al obtener las imágenes: %v", err)
+			return
+
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				id       uint64
+				mime     string
+				db_datas []byte
+			)
+			if err = rows.Scan(&id, &mime, &db_datas); err != nil {
+				log.Printf("error al leer el valor de db_datas: %v", err)
+				continue
+			}
+
+			base64Str := base64.StdEncoding.EncodeToString(db_datas)
+			images = append(images, fmt.Sprintf("data:%s;base64,", mime)+base64Str)
+		}
+	}()
 	row := r.DB.QueryRow(query)
+
 	if row == nil {
 		return nil, errors.New("error al obtener producto")
 	}
@@ -74,6 +109,11 @@ func (r *odooProductRepo) GetByID(id int64) (*model.ProductDTO, error) {
 		}
 	}
 	product.Stock = stock.Float64
+	wg.Wait()
+	if errorImages != nil && errorImages != sql.ErrNoRows {
+		return nil, err
+	}
+	product.Images = images
 	return &product, nil
 
 }
@@ -272,34 +312,33 @@ func (r *odooProductRepo) GetFiltered(offset, limit int, categID, minPrice, maxP
 		return nil, errQueryProducts
 	}
 
-	query = "SELECT res_id, mimetype, db_datas FROM ir_attachment WHERE db_dates NOT NULL AND length(db_datas) > 0 AND ("
+	query = "SELECT res_id, mimetype, db_datas FROM ir_attachment WHERE length(db_datas) > 0 AND (mimetype = 'image/png' OR mimetype = 'image/jpeg') AND ("
 	for id := range ProductsMap {
 		query += fmt.Sprintf(" res_id = %d OR", id)
 	}
 	query = query[:len(query)-3] + " );"
 	rows, err := r.DB.Query(query)
-	if err != nil {
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				id       uint64
+				mime     string
+				db_datas []byte
+			)
+			if err = rows.Scan(&id, &mime, &db_datas); err != nil {
+				log.Printf("error al leer el valor de db_datas: %v", err)
+				continue
+			}
+
+			base64Str := base64.StdEncoding.EncodeToString(db_datas)
+			ProductsMap[id].Images = append(ProductsMap[id].Images, fmt.Sprintf("data:%s;base64,", mime)+base64Str)
+		}
+		for _, product := range ProductsMap {
+			ProductsResult.Products = append(ProductsResult.Products, *product)
+		}
+	} else if err != sql.ErrNoRows {
 		return nil, fmt.Errorf("error al obtener las imágenes: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			id       uint64
-			mime     string
-			db_datas []byte
-		)
-		if err = rows.Scan(&id, mime, &db_datas); err != nil {
-			log.Printf("error al leer el valor de db_datas: %v", err)
-			continue
-		}
-		if mime != "image/png" && mime != "image/jpeg" {
-			continue
-		}
-		base64Str := base64.StdEncoding.EncodeToString(db_datas)
-		ProductsMap[id].Images = append(ProductsMap[id].Images, fmt.Sprintf("data:%s;base64,", mime)+base64Str)
-	}
-	for _, product := range ProductsMap {
-		ProductsResult.Products = append(ProductsResult.Products, *product)
 	}
 
 	return ProductsResult, nil

@@ -28,7 +28,7 @@ func Start() *Env {
 	once.Do(func() {
 		cfg = &Env{
 			AddrClient: getEnv("ADDR_CLIENT", "http://localhost:5173"),
-			Addr:       getEnv("ADDR", "localhost:8060"),
+			Addr:       getEnv("ADDR", "localhost:8050"),
 			DBHost:     getEnv("DB_HOST", "localhost"),
 			DBPortOdoo: getEnv("DB_PORT", "5433"),
 			DBNameOdoo: getEnv("DB_NAME", "odoo"),
