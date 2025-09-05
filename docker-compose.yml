@@ -35,7 +35,6 @@ services:
       DB_USER: odoo
       DB_PASS: odoo
       SSL_MODE: disable
-      SECRET_KEY: verysecretkeyforjwtinproductionusealongersecret
       FILESTORE_PATH: /app/filestore # Ruta del filestore
     volumes:
       - .:/app

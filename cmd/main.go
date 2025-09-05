@@ -28,10 +28,10 @@ func main() {
 	})
 	log.Println("Database connection successful")
 
-	if err := db.ApplyMigrations(connOdoo, "cmd/internal/db/migration.sql"); err != nil {
-		log.Fatalf("error applying migrations: %v", err)
-	}
-	log.Println("Migrations applied successfully")
+	// if err := db.ApplyMigrations(connOdoo, "cmd/internal/db/migration.sql"); err != nil {
+	// 	log.Fatalf("error applying migrations: %v", err)
+	// }
+	// log.Println("Migrations applied successfully")
 	defer connOdoo.Close()
 
 	if err := os.MkdirAll(repository.UploadDir, 0755); err != nil {

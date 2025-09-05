@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -35,7 +37,7 @@ func NewProductHandler(s service.ProductService) *ProductHandler {
 func (h *ProductHandler) RegisterRoutes(r chi.Router, env *env.Env) {
 	r.Use(middleware.CORSmiddleware(env))
 	r.Use(middleware.RecoverPanic())
-	r.Post("/jireh-assistant", h.jirehAssistant)
+	r.Get("/jireh-assistant", h.jirehAssistant)
 	r.Route("/products", func(r chi.Router) {
 		r.Get("/", h.getAll)                     // GET /products?page=&page_size=
 		r.Get("/{id}", h.getByID)                // GET /products/{id}
@@ -48,7 +50,11 @@ func (h *ProductHandler) RegisterRoutes(r chi.Router, env *env.Env) {
 
 }
 
-const GeminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:streamGenerateContent"
+const (
+	GeminiUrl   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:"
+	inStreaming = "streamGenerateContent"
+	normal      = "generateContent"
+)
 
 // —————————————————————————————————————————————————————————————————
 // Aux: interfaz para poder usar tanto http.ResponseWriter
@@ -65,7 +71,11 @@ type sseWriter interface {
 type RequestBody struct {
 	Contents []Content `json:"contents"`
 }
-
+type ResponseBody struct {
+	Candidates []struct {
+		Content Content `json:"content"`
+	} `json:"candidates"`
+}
 type Content struct {
 	Role  string `json:"role"`
 	Parts []Part `json:"parts"`
@@ -82,73 +92,88 @@ type httpSSEWriter struct {
 // —————————————————————————————————————————————————————————————————
 // Función que hace el POST y streamea el resultado como SSE
 // —————————————————————————————————————————————————————————————————
-func streamFromGemini(message []Content, w sseWriter) error {
+func getFromGemini(message []Content, w sseWriter, streaming bool) (*ResponseBody, error) {
 	// 1) Preparamos el body JSON
 	reqBody := RequestBody{Contents: message}
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("marshal request body: %w", err)
+		return nil, fmt.Errorf("marshal request body: %w", err)
 	}
 
 	// 2) Creamos la petición
-	url := fmt.Sprintf("%s?key=%s", GeminiUrl, os.Getenv("GEMINI_API_KEY"))
+	var url string
+	key, exist := os.LookupEnv("GEMINI_API_KEY")
+	if !exist {
+		return nil, fmt.Errorf("GEMINI_API_KEY not set in environment")
+	}
+	if streaming {
+		url = fmt.Sprintf("%s?key=%s", GeminiUrl+inStreaming, key)
+	} else {
+		url = fmt.Sprintf("%s?key=%s", GeminiUrl+normal, key)
+	}
+
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return fmt.Errorf("new request: %w", err)
+		return nil, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	// 3) Ejecutamos
 	resp, err := http.DefaultClient.Do(req)
+
 	if err != nil {
-		return fmt.Errorf("perform request: %w", err)
+		return nil, fmt.Errorf("perform request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// 4) Encabezados SSE
-	w.Write([]byte(":\n")) // comentario para mantener viva la conexión
+	// 4) Encabezados SSE iniciales
+	if bodyBytes, _ := io.ReadAll(resp.Body); resp.StatusCode != http.StatusOK {
+
+		log.Printf("non-200 response: %d - %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("non-200 response: %d", resp.StatusCode)
+	} else if !streaming {
+		reqBody := &ResponseBody{}
+		json.Unmarshal(bodyBytes, reqBody)
+		return reqBody, nil
+
+	}
+	w.Write([]byte(":\n"))
 	w.Write([]byte("retry: 10000\n"))
 	w.Write([]byte("event: message\n"))
 
-	// 5) Procesamos el stream
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
+	// 5) Procesamos el stream usando bufio.Reader
+	reader := bufio.NewReader(resp.Body)
+	for line, err := reader.ReadBytes('\n'); err == nil; line, err = reader.ReadBytes('\n') {
 
-		// ignoramos todo lo que no empiece con "data: " o sea "[DONE]"
-		if !strings.HasPrefix(line, "data: ") || strings.Contains(line, "[DONE]") {
+		strLine := strings.TrimSpace(string(line))
+		log.Println("GEMINI line:", strLine)
+		if strLine == "" || !strings.HasPrefix(strLine, "data: ") || strings.Contains(strLine, "[DONE]") {
 			continue
 		}
 
-		// parseamos el JSON que viene tras "data: "
-		var parsed struct {
-			Candidates []struct {
-				Content struct {
-					Part []Part `json:"parts"`
-				} `json:"content"`
-			} `json:"candidates"`
-		}
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &parsed); err != nil {
-			// skip si no podemos parsear
+		// Parseamos el JSON
+		var parsed ResponseBody
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(strLine, "data: ")), &parsed); err != nil {
 			continue
 		}
-		if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Part) == 0 {
+		if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
 			continue
 		}
 
-		// extraemos el texto y escribimos como SSE
-		content := parsed.Candidates[0].Content.Part[0].Text
+		// Texto parcial
+		content := parsed.Candidates[0].Content.Parts[0].Text
 		payload := fmt.Sprintf("data: %s\n\n", content)
+
 		if _, err := w.Write([]byte(payload)); err != nil {
-			return fmt.Errorf("write to client: %w", err)
+			return nil, fmt.Errorf("write to client: %w", err)
 		}
 		w.Flush()
 	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scanner error: %w", err)
+	if err != io.EOF {
+		return nil, fmt.Errorf("read stream: %w", err)
 	}
-	return nil
+
+	return nil, nil
 }
 
 // —————————————————————————————————————————————————————————————————
@@ -156,60 +181,153 @@ func streamFromGemini(message []Content, w sseWriter) error {
 // —————————————————————————————————————————————————————————————————
 func (h *ProductHandler) jirehAssistant(w http.ResponseWriter, r *http.Request) {
 	// 1) Parámetro de consulta
-	q := chi.URLParam(r, "q")
+	q := r.URL.Query().Get("q")
+
 	if q == "" {
+
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, map[string]string{"error": "query 'q' is required"})
 		return
 	}
-	// cookie, err := r.Cookie("quantity")
+	cookie, err := r.Cookie("quantity")
 
-	// if err!=nil{
-
-	// }
-
-	// 2) Obtenemos categorías
-	cats, err := h.svc.GetCategorys()
 	if err != nil {
-		render.Status(r, http.StatusInternalServerError)
-		render.JSON(w, r, map[string]string{"error": "failed to load categories"})
+		if err != http.ErrNoCookie {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, map[string]string{"error": "error in the request"})
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     "quantity",
+			Value:    "0",
+			Expires:  time.Now().AddDate(0, 1, 0),
+			HttpOnly: true,
+		})
+	}
+	value, err := strconv.Atoi(cookie.Value)
+	if err != nil {
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, map[string]string{"error": "error in the request"})
 		return
 	}
-	var categoryNames []string
-	for _, c := range cats {
-		categoryNames = append(categoryNames, c.Category)
+	if value > 5 {
+		render.Status(r, http.StatusTooManyRequests)
+		render.JSON(w, r, map[string]string{"error": "You have exceeded the limit of requests, please try again later"})
+		return
 	}
 
-	// 3) Preparamos prompt de sistema
-	prompt := fmt.Sprintf(
-		"Eres un asistente de belleza. El usuario pide: %q.\n"+
-			"Categorías disponibles:\n%s\n"+
-			"Responde solo con el nombre exacto de la mejor categoría.",
-		q, strings.Join(categoryNames, "\n"),
-	)
+	prompt := fmt.Sprintf("Eres un asistente de belleza. Dime si a partir del siguiente texto repsponde solamente yes si el usuario pide información de productos referentas a mi teinda o no si pide consejos generales o referencias de otro lugar: %s.\n", q)
 	systemIntro := Content{
 		Role:  "user",
 		Parts: []Part{{Text: prompt}},
 	}
-
-	// 4) Cabeceras SSE
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	fl, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+	response, err := getFromGemini([]Content{systemIntro}, nil, false)
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": "error in the request to gemini"})
 		return
 	}
-	writer := &httpSSEWriter{
-		ResponseWriter: w,
-		Flusher:        fl,
+
+	responseText := strings.ToLower(response.Candidates[0].Content.Parts[0].Text)
+	if responseText[len(responseText)-1] == '\n' {
+		responseText = responseText[:len(responseText)-1]
 	}
 
-	// 5) Llamamos al streamer
-	if err := streamFromGemini([]Content{systemIntro}, writer); err != nil {
-		// en caso de error de streaming, informamos al cliente y cerramos
-		http.Error(w, "stream error: "+err.Error(), http.StatusInternalServerError)
+	if responseText == "yes" {
+		cats, err := h.svc.GetCategorys()
+		if err != nil {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, map[string]string{"error": "failed to load categories"})
+			return
+		}
+
+		var categoryNames []string
+		for _, c := range cats {
+			categoryNames = append(categoryNames, c.Category)
+		}
+
+		// 3) Preparamos prompt de sistema
+		prompt = fmt.Sprintf(
+			"Eres un asistente de belleza. El usuario pide: %q.\n"+
+				"Categorías disponibles:\n%s\n"+
+				"Responde solo con el nombre exacto de la mejor categoría.",
+			q, strings.Join(categoryNames, "\n"),
+		)
+
+		systemIntro = Content{
+			Role:  "user",
+			Parts: []Part{{Text: prompt}},
+		}
+		response, err := getFromGemini([]Content{systemIntro}, nil, false)
+
+		if err != nil {
+
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, map[string]string{"error": "error in the request to gemini"})
+			return
+		}
+		category := strings.TrimSpace(response.Candidates[0].Content.Parts[0].Text)
+		products, err := h.svc.GetFiltered(1, 5, nil, nil, nil, []string{category}, "", "")
+		if err != nil {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, map[string]string{"error": "failed to load products"})
+			return
+		}
+
+		if len(products.Products) == 0 {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, map[string]string{"error": "no products found for the selected category"})
+			return
+		}
+		// 3) Preparamos prompt de sistema
+		var productNames []string
+		for _, p := range products.Products {
+			productNames = append(productNames, fmt.Sprintf("- %s", p.Name))
+
+		}
+		log.Println(productNames)
+		prompt = fmt.Sprintf(
+			"Eres un asistente de belleza. El usuario pide: %q.\n"+
+				"Productos disponibles en la categoría %q:\n%s\n"+
+				"Responde con una recomendación breve de 100 caracteres máximo, incluyendo los nombres de los productos que mejor respondan a la petición del usuario.",
+			q, category, strings.Join(productNames, "\n"),
+		)
+		systemIntro = Content{
+			Role:  "user",
+			Parts: []Part{{Text: prompt}},
+		}
+
+		// 4) Cabeceras SSE
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		fl, ok := w.(http.Flusher)
+
+		if !ok {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, map[string]string{"error": "streaming unsupported"})
+			return
+		}
+
+		writer := &httpSSEWriter{
+			ResponseWriter: w,
+			Flusher:        fl,
+		}
+
+		// 5) Llamamos al streamer
+		if _, err := getFromGemini([]Content{systemIntro}, writer, true); err != nil {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, map[string]string{"error": "error in the request to gemini"})
+			return
+		}
+		value++
+		http.SetCookie(w, &http.Cookie{
+			Name:     "quantity",
+			Value:    strconv.Itoa(value),
+			Expires:  time.Now().AddDate(0, 1, 0),
+			HttpOnly: true,
+		})
 	}
 }
 

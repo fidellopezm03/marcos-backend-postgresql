@@ -2,3 +2,4 @@
 filestore/
 
 dump.sql
+.env
